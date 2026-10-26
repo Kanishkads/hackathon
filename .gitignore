@@ -1,0 +1,18 @@
+# Python environments
+.venv/
+**/.venv/
+
+# Python cache and tests
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Secrets and local data
+.env
+.env.*
+!.env.example
+*.db
+
+# Frontend dependencies/build
+node_modules/
+dist/
