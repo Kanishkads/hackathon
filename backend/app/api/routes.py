@@ -5,8 +5,10 @@ Defines the core REST endpoints for:
 - Sensitive prompt scanning and sanitization (POST /api/scan)
 - Server-side approval validation (POST /api/approve)
 - Ephemeral session status inspection (GET /api/session/{session_id}/status)
+- Secure AI forwarding with approved sanitized prompt (POST /api/forward)
 """
 
+import hmac
 import time
 from typing import Dict, List, Tuple
 from fastapi import APIRouter, HTTPException, status
@@ -24,10 +26,18 @@ from app.models.schemas import (
     ApproveRequest,
     ApproveResponse,
     EntityDetectionInfo,
+    ForwardRequest,
+    ForwardResponse,
     HealthResponse,
     ScanRequest,
     ScanResponse,
     SessionStatusResponse,
+)
+from app.services import (
+    AIProviderConfigError,
+    AIProviderError,
+    AIProviderTimeoutError,
+    get_ai_provider,
 )
 
 router = APIRouter(prefix="/api", tags=["Gateway"])
@@ -91,7 +101,6 @@ def scan_prompt(request: ScanRequest) -> ScanResponse:
 
     # Build reverse mapping to link each detected entity to its placeholder
     # mask_result.mapping is {placeholder: original_value}
-    # For safety, link using entity value matching
     value_to_placeholder: Dict[str, str] = {
         val: ph for ph, val in mask_result.mapping.items()
     }
@@ -212,4 +221,82 @@ def get_session_status(session_id: str) -> SessionStatusResponse:
         placeholders=session.placeholders,
         entity_types=session.entity_types,
         expires_in_seconds=remaining_seconds
+    )
+
+
+@router.post(
+    "/forward",
+    response_model=ForwardResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Forward Approved Sanitized Prompt",
+    description="Transmits the approved sanitized prompt to the configured AI provider. Fails closed if unapproved."
+)
+async def forward_prompt(request: ForwardRequest) -> ForwardResponse:
+    """Forwards the approved sanitized prompt to the AI provider.
+
+    Strict Security Guarantees:
+    1. Rejects missing, invalid, or expired sessions (HTTP 404).
+    2. Rejects unapproved sessions (HTTP 403 Forbidden).
+    3. Rejects tampered / mismatched sanitized prompts (HTTP 400 Bad Request).
+    4. Forwards ONLY the approved sanitized prompt. Never sends original prompts or mappings.
+    5. Returns the AI response in sanitized form (unmasking is not performed in this phase).
+    """
+    session = session_manager.get_session(request.session_id)
+    if session is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Session not found or has expired. Please re-scan and approve your prompt."
+        )
+
+    # 1. Enforce server-side approval check
+    if not session.is_approved:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Approval required: The prompt must be reviewed and approved via /api/approve before forwarding."
+        )
+
+    # 2. Enforce prompt integrity (constant-time hash comparison)
+    candidate_hash = session_manager.hash_prompt(request.sanitized_prompt)
+    if not hmac.compare_digest(session.sanitized_prompt_hash, candidate_hash):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Sanitized prompt does not match the approved session."
+        )
+
+    # 3. Instantiate configured AI provider
+    try:
+        provider = get_ai_provider()
+    except AIProviderConfigError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc)
+        )
+
+    # 4. Forward strictly sanitized prompt to provider
+    try:
+        ai_response = await provider.generate(request.sanitized_prompt)
+    except AIProviderTimeoutError:
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail="AI provider request timed out."
+        )
+    except AIProviderError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"AI provider communication error: {str(exc)}"
+        )
+    except Exception:
+        # Fallback for unexpected failures without leaking internal details
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="An error occurred while communicating with the AI provider."
+        )
+
+    return ForwardResponse(
+        session_id=session.session_id,
+        provider=provider.provider_name,
+        model=provider.model_name,
+        sanitized_response=ai_response,
+        is_mock=provider.is_mock,
+        disclaimer=PRIVACY_DISCLAIMER
     )
