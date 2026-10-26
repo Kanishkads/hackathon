@@ -6,6 +6,7 @@ Defines the core REST endpoints for:
 - Server-side approval validation (POST /api/approve)
 - Ephemeral session status inspection (GET /api/session/{session_id}/status)
 - Secure AI forwarding with approved sanitized prompt (POST /api/forward)
+- AI response placeholder validation and safe restoration (POST /api/unmask)
 """
 
 import hmac
@@ -22,6 +23,7 @@ from app.core.config import (
 from app.core.session import session_manager
 from app.engine.detector import Confidence, DetectedEntity, SensitiveEntityDetector
 from app.engine.masker import Masker
+from app.engine.unmasker import ResponseUnmasker
 from app.models.schemas import (
     ApproveRequest,
     ApproveResponse,
@@ -32,6 +34,8 @@ from app.models.schemas import (
     ScanRequest,
     ScanResponse,
     SessionStatusResponse,
+    UnmaskRequest,
+    UnmaskResponse,
 )
 from app.services import (
     AIProviderConfigError,
@@ -45,6 +49,7 @@ router = APIRouter(prefix="/api", tags=["Gateway"])
 # Instantiate engine components once at module load
 detector = SensitiveEntityDetector()
 masker = Masker(detector=detector)
+unmasker = ResponseUnmasker()
 
 
 @router.get(
@@ -239,7 +244,7 @@ async def forward_prompt(request: ForwardRequest) -> ForwardResponse:
     2. Rejects unapproved sessions (HTTP 403 Forbidden).
     3. Rejects tampered / mismatched sanitized prompts (HTTP 400 Bad Request).
     4. Forwards ONLY the approved sanitized prompt. Never sends original prompts or mappings.
-    5. Returns the AI response in sanitized form (unmasking is not performed in this phase).
+    5. Returns the AI response in sanitized form (unmasking is performed via POST /api/unmask).
     """
     session = session_manager.get_session(request.session_id)
     if session is None:
@@ -298,5 +303,59 @@ async def forward_prompt(request: ForwardRequest) -> ForwardResponse:
         model=provider.model_name,
         sanitized_response=ai_response,
         is_mock=provider.is_mock,
+        disclaimer=PRIVACY_DISCLAIMER
+    )
+
+
+@router.post(
+    "/unmask",
+    response_model=UnmaskResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Validate and Restore Placeholders",
+    description="Safely restores validated placeholders in an AI response using the active approved session mapping."
+)
+def unmask_response(request: UnmaskRequest) -> UnmaskResponse:
+    """Restores placeholders in the AI response using the session's mapping.
+
+    Security Guarantees:
+    1. Rejects missing, invalid, or expired sessions (HTTP 404).
+    2. Rejects unapproved sessions (HTTP 403 Forbidden).
+    3. Rejects empty or whitespace-only response bodies (HTTP 400 Bad Request).
+    4. Validates every placeholder: ONLY placeholders existing in the session mapping are substituted.
+    5. Flags and leaves intact any unknown (e.g. [EMAIL_99]) or malformed placeholders.
+    6. Never exposes mappings across sessions.
+    """
+    raw_response = request.sanitized_response
+    if not raw_response or not raw_response.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Response text cannot be empty or whitespace only."
+        )
+
+    session = session_manager.get_session(request.session_id)
+    if session is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Session not found or has expired. Please re-scan your prompt."
+        )
+
+    if not session.is_approved:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Approval required: The session must be approved before unmasking responses."
+        )
+
+    # Perform safe restoration using the isolated session mapping
+    result = unmasker.unmask(
+        response_text=raw_response,
+        session_mapping=session.mapping
+    )
+
+    return UnmaskResponse(
+        session_id=session.session_id,
+        restored_text=result.restored_text,
+        restored_placeholders=result.restored_placeholders,
+        unrecognized_placeholders=result.unrecognized_placeholders,
+        warnings=result.warnings,
         disclaimer=PRIVACY_DISCLAIMER
     )

@@ -1,6 +1,7 @@
 """LocalShield AI - Engine Package.
 
-Exports the SensitiveEntityDetector, DetectedEntity, Masker, and MaskResult.
+Exports the SensitiveEntityDetector, DetectedEntity, Masker, MaskResult,
+ResponseUnmasker, and UnmaskResult.
 """
 
 from app.engine.detector import (
@@ -10,6 +11,7 @@ from app.engine.detector import (
     SensitiveEntityDetector,
 )
 from app.engine.masker import MaskResult, Masker
+from app.engine.unmasker import ResponseUnmasker, UnmaskResult
 
 __all__ = [
     "Confidence",
@@ -18,4 +20,6 @@ __all__ = [
     "SensitiveEntityDetector",
     "MaskResult",
     "Masker",
+    "ResponseUnmasker",
+    "UnmaskResult",
 ]
