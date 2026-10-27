@@ -106,12 +106,73 @@ class TestResponseUnmaskerEngine:
 
     def test_safe_repr_redacts_restored_text(self):
         unmasker = ResponseUnmasker()
-        mapping = {"[PASSWORD_1]": "SuperSecretPass123!"}
-        res = unmasker.unmask("Password is [PASSWORD_1]", mapping)
+        mapping = {"[EMAIL_1]": "alice@example.com", "[PASSWORD_1]": "SuperSecretPass123!"}
+        res = unmasker.unmask("Contact [EMAIL_1] with pass [PASSWORD_1]", mapping)
 
         repr_str = repr(res)
+        assert "alice@example.com" not in repr_str
         assert "SuperSecretPass123!" not in repr_str
-        assert "restored_placeholders=['[PASSWORD_1]']" in repr_str
+        assert "restored_placeholders=['[EMAIL_1]']" in repr_str
+        assert "redacted=['[PASSWORD_1]']" in repr_str
+
+    def test_unmask_person_placeholder(self):
+        unmasker = ResponseUnmasker()
+        mapping = {"[PERSON_1]": "Jane Doe"}
+        text = "Consulted with [PERSON_1] on patient care."
+        res = unmasker.unmask(text, mapping)
+
+        assert res.restored_text == "Consulted with Jane Doe on patient care."
+        assert "[PERSON_1]" in res.restored_placeholders
+
+    def test_high_risk_credentials_never_restored(self):
+        """High risk credentials (PASSWORD, API_KEY) must remain redacted by default."""
+        unmasker = ResponseUnmasker()
+        mapping = {
+            "[PERSON_1]": "Jane Doe",
+            "[PASSWORD_1]": "SuperSecretPass123!",
+            "[API_KEY_1]": "sk-proj-secretkey123"
+        }
+        text = "Hello [PERSON_1], your password is [PASSWORD_1] and token is [API_KEY_1]."
+        res = unmasker.unmask(text, mapping)
+
+        # PERSON is restored, PASSWORD and API_KEY remain redacted
+        assert "Jane Doe" in res.restored_text
+        assert "[PASSWORD_1]" in res.restored_text
+        assert "[API_KEY_1]" in res.restored_text
+        assert "SuperSecretPass123!" not in res.restored_text
+        assert "sk-proj-secretkey123" not in res.restored_text
+        assert "[PERSON_1]" in res.restored_placeholders
+        assert "[PASSWORD_1]" in res.redacted_placeholders
+        assert "[API_KEY_1]" in res.redacted_placeholders
+        assert any("High-risk" in w for w in res.warnings)
+
+    def test_missing_placeholders_not_inserted_unnecessarily(self):
+        """If AI does not mention a placeholder, its original value must not be injected."""
+        unmasker = ResponseUnmasker()
+        mapping = {
+            "[PERSON_1]": "Jane Doe",
+            "[EMAIL_1]": "jane@example.com"
+        }
+        # Response only contains [PERSON_1]
+        text = "Thank you, [PERSON_1]. Your request has been queued."
+        res = unmasker.unmask(text, mapping)
+
+        assert res.restored_text == "Thank you, Jane Doe. Your request has been queued."
+        assert "jane@example.com" not in res.restored_text
+        assert "[PERSON_1]" in res.restored_placeholders
+        assert "[EMAIL_1]" not in res.restored_placeholders
+
+    def test_response_leak_detection_triggers_warning(self):
+        """If AI response contains the raw sensitive value, leak_detected is True."""
+        unmasker = ResponseUnmasker()
+        mapping = {"[EMAIL_1]": "alice@example.com"}
+        # The AI response directly leaks the raw secret
+        text = "We found your record for alice@example.com."
+        res = unmasker.unmask(text, mapping)
+
+        assert res.leak_detected is True
+        assert any("leak detected" in w.lower() for w in res.warnings)
+
 
 
 # ---------------------------------------------------------------------------
@@ -242,3 +303,51 @@ class TestUnmaskEndpoint:
         res_b = client.post("/api/unmask", json={"session_id": sid_b, "sanitized_response": "Resolved for [EMAIL_1]"})
         assert "bob@example.com" in res_b.json()["restored_text"]
         assert "alice@example.com" not in res_b.json()["restored_text"]
+
+    def test_unmask_redacts_high_risk_secrets_via_endpoint(self):
+        """High risk credentials must remain redacted when calling /api/unmask."""
+        prompt = "User: Dr. Jane Doe, password = 'SuperSecretPassword123!'"
+        scan_res = client.post("/api/scan", json={"prompt": prompt})
+        assert scan_res.status_code == 200
+        scan_data = scan_res.json()
+        sid = scan_data["session_id"]
+        sanitized = scan_data["sanitized_prompt"]
+
+        app_res = client.post("/api/approve", json={"session_id": sid, "sanitized_prompt": sanitized})
+        assert app_res.status_code == 200
+
+        unmask_res = client.post(
+            "/api/unmask",
+            json={
+                "session_id": sid,
+                "sanitized_response": "Hello [PERSON_1], password confirmed as [PASSWORD_1]."
+            }
+        )
+        assert unmask_res.status_code == 200
+        data = unmask_res.json()
+        assert "Jane Doe" in data["restored_text"]
+        assert "[PASSWORD_1]" in data["restored_text"]
+        assert "SuperSecretPassword123!" not in data["restored_text"]
+        assert "[PASSWORD_1]" in data["redacted_placeholders"]
+
+    def test_unmask_detects_response_leak_via_endpoint(self):
+        """When an AI response leaks the raw sensitive value, /api/unmask flags leak_detected."""
+        prompt = "Send to alice.smith@example.com"
+        scan_res = client.post("/api/scan", json={"prompt": prompt})
+        sid = scan_res.json()["session_id"]
+        sanitized = scan_res.json()["sanitized_prompt"]
+
+        client.post("/api/approve", json={"session_id": sid, "sanitized_prompt": sanitized})
+
+        unmask_res = client.post(
+            "/api/unmask",
+            json={
+                "session_id": sid,
+                "sanitized_response": "Found record for alice.smith@example.com directly."
+            }
+        )
+        assert unmask_res.status_code == 200
+        data = unmask_res.json()
+        assert data["leak_detected"] is True
+        assert len(data["warnings"]) > 0
+

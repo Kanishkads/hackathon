@@ -346,6 +346,18 @@ code, pre, .font-mono {
   border: 1px solid rgba(168, 85, 247, 0.3);
 }
 
+.entity-badge-person {
+  background: rgba(16, 185, 129, 0.15);
+  color: #34D399;
+  border: 1px solid rgba(16, 185, 129, 0.3);
+}
+
+.chip-person {
+  background: rgba(16, 185, 129, 0.15);
+  color: #34D399;
+  border: 1px solid rgba(16, 185, 129, 0.3);
+}
+
 /* Cyber Code & Dual-Console Panes */
 .code-panel {
   background: var(--bg-inset);

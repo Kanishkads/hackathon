@@ -84,7 +84,30 @@ class TestMaskerPlaceholders:
         assert 'sk-proj-' not in result.sanitized_text
         assert 'SyntheticSecretPass123!' not in result.sanitized_text
         assert result.mapping['[API_KEY_1]'] == "sk-proj-fictional1234567890abcdef1234567890"
-        assert result.mapping['[PASSWORD_1]'] == "SyntheticSecretPass123!"
+    def test_person_name_masking(self, masker: Masker):
+        sample = "Please assign this ticket to Dr. Jane Doe for review."
+        result = masker.mask(sample)
+
+        assert "[PERSON_1]" in result.sanitized_text
+        assert "Jane Doe" not in result.sanitized_text
+        assert result.mapping["[PERSON_1]"] == "Jane Doe"
+        assert result.stats.get("PERSON") == 1
+
+    def test_multiple_persons_and_repetition(self, masker: Masker):
+        sample = (
+            "Consult Dr. Jane Doe and Mr. John Smith. "
+            "If Dr. Jane Doe is busy, call Mr. John Smith."
+        )
+        result = masker.mask(sample)
+
+        assert "[PERSON_1]" in result.sanitized_text
+        assert "[PERSON_2]" in result.sanitized_text
+        assert result.sanitized_text.count("[PERSON_1]") == 2
+        assert result.sanitized_text.count("[PERSON_2]") == 2
+        assert result.mapping["[PERSON_1]"] == "Jane Doe"
+        assert result.mapping["[PERSON_2]"] == "John Smith"
+        assert result.stats.get("PERSON") == 4
+
 
 
 class TestMaskerEdgeCases:

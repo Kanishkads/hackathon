@@ -36,6 +36,8 @@ from app.models.schemas import (
     SessionStatusResponse,
     UnmaskRequest,
     UnmaskResponse,
+    ProviderTestResponse,
+    DispatchRequest,
 )
 from app.services import (
     AIProviderConfigError,
@@ -356,6 +358,95 @@ def unmask_response(request: UnmaskRequest) -> UnmaskResponse:
         restored_text=result.restored_text,
         restored_placeholders=result.restored_placeholders,
         unrecognized_placeholders=result.unrecognized_placeholders,
+        redacted_placeholders=result.redacted_placeholders,
+        leak_detected=result.leak_detected,
         warnings=result.warnings,
         disclaimer=PRIVACY_DISCLAIMER
     )
+
+
+@router.get(
+    "/provider/test",
+    response_model=ProviderTestResponse,
+    summary="Test Model Connectivity",
+    description="Makes a minimal model request to verify real connectivity with the configured AI provider. A health endpoint alone is not proof of model connectivity."
+)
+@router.post(
+    "/provider/test",
+    response_model=ProviderTestResponse,
+    summary="Test Model Connectivity",
+    description="Makes a minimal model request to verify real connectivity with the configured AI provider."
+)
+async def test_provider_connectivity() -> ProviderTestResponse:
+    """Verifies live model connectivity by executing a minimal model probe request.
+
+    Guarantees:
+    - Never returns fake responses when a LIVE model fails.
+    - Accurately reports latency and sample response from the configured model.
+    - Redacts credentials from error messages.
+    """
+    try:
+        provider = get_ai_provider()
+        res = await provider.test_connectivity()
+        return ProviderTestResponse(**res)
+    except AIProviderConfigError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc)
+        )
+    except AIProviderTimeoutError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail=str(exc)
+        )
+    except AIProviderError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=str(exc)
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"AI provider connectivity test failed: {str(exc)}"
+        )
+
+
+@router.post(
+    "/dispatch",
+    summary="Live Gateway Dispatch",
+    description="Direct gateway dispatch endpoint compatible with frontend Live Mode."
+)
+async def dispatch_sanitized_prompt(request: DispatchRequest):
+    """Direct dispatch endpoint for frontend Live Mode integration.
+
+    Guarantees:
+    - Sends ONLY the sanitized prompt to the AI provider.
+    - Never returns fake mock responses when in LIVE mode.
+    """
+    sanitized = request.sanitized_prompt
+    if not sanitized or not sanitized.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Prompt cannot be empty or whitespace only."
+        )
+
+    try:
+        provider = get_ai_provider()
+        ai_response = await provider.generate(sanitized)
+    except AIProviderConfigError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc))
+    except AIProviderTimeoutError as exc:
+        raise HTTPException(status_code=status.HTTP_504_GATEWAY_TIMEOUT, detail=str(exc))
+    except AIProviderError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"AI provider communication error: {str(exc)}")
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="An error occurred while communicating with the AI provider.")
+
+    return {
+        "id": f"dispatch-{int(time.time() * 1000)}",
+        "model": provider.model_name,
+        "completion": ai_response,
+        "rehydrated": ai_response,
+        "is_mock": provider.is_mock,
+    }
+

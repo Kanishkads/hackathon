@@ -188,6 +188,14 @@ class UnmaskResponse(BaseModel):
         default_factory=list,
         description="List of unknown or hallucinated placeholders that were NOT substituted."
     )
+    redacted_placeholders: List[str] = Field(
+        default_factory=list,
+        description="List of high-risk credentials kept safely redacted in response."
+    )
+    leak_detected: bool = Field(
+        default=False,
+        description="True if the raw AI response leaked original sensitive values."
+    )
     warnings: List[str] = Field(
         default_factory=list,
         description="Alerts regarding placeholder anomalies or missing entities."
@@ -196,3 +204,33 @@ class UnmaskResponse(BaseModel):
         default=PRIVACY_DISCLAIMER,
         description="Privacy boundary statement."
     )
+
+
+# ---------------------------------------------------------------------------
+# Provider Connectivity Test Schemas
+# ---------------------------------------------------------------------------
+
+class ProviderTestResponse(BaseModel):
+    """Response model for provider connectivity verification."""
+    status: str = Field(..., examples=["connected"])
+    connected: bool = Field(..., examples=[True])
+    provider: str = Field(..., examples=["gemma"])
+    model: str = Field(..., examples=["gemma-4-26b-a4b-it"])
+    is_mock: bool = Field(..., examples=[False])
+    latency_ms: int = Field(..., examples=[125])
+    sample_response: str = Field(..., examples=["Gemma 4 model probe acknowledged."])
+
+
+# ---------------------------------------------------------------------------
+# Gateway Dispatch Schema (Frontend Live Mode Compatibility)
+# ---------------------------------------------------------------------------
+
+class DispatchRequest(BaseModel):
+    """Request model for direct frontend dispatch."""
+    sanitized_prompt: str = Field(
+        ...,
+        description="Approved sanitized prompt with placeholders.",
+        min_length=MIN_PROMPT_LENGTH,
+        max_length=MAX_PROMPT_LENGTH
+    )
+

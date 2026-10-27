@@ -3,7 +3,7 @@
  * Matches backend engine definitions in backend/app/engine/detector.py & masker.py
  */
 
-export type EntityType = 'EMAIL' | 'PHONE' | 'API_KEY' | 'PASSWORD';
+export type EntityType = 'PERSON' | 'EMAIL' | 'PHONE' | 'API_KEY' | 'PASSWORD';
 
 export type Confidence = 'HIGH' | 'MEDIUM' | 'LOW';
 
@@ -31,6 +31,7 @@ export interface MaskResult {
 
 export interface ScanReport {
   scanId: string;
+  sessionId?: string;
   timestamp: string;
   originalText: string;
   sanitizedText: string;
@@ -41,6 +42,8 @@ export interface ScanReport {
   blockReasons: string[];
   executionTimeMs: number;
   isMock: boolean;
+  warnings?: string[];
+  placeholders?: string[];
 }
 
 export interface PolicyConfig {
@@ -78,4 +81,8 @@ export interface AIResponse {
   tokensCompletion: number;
   timestamp: string;
   isMock: boolean;
+  leakDetected?: boolean;
+  redactedPlaceholders?: string[];
+  warnings?: string[];
 }
+

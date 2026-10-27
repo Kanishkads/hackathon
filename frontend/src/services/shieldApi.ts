@@ -29,6 +29,7 @@ const POLICY_STORAGE_KEY = 'localshield_policy_config_v2';
 export const DEFAULT_POLICY_CONFIG: PolicyConfig = {
   name: 'Balanced Gateway (Default)',
   defaultAction: {
+    PERSON: 'MASK',
     API_KEY: 'MASK',
     PASSWORD: 'BLOCK',
     EMAIL: 'MASK',
@@ -41,6 +42,7 @@ export const DEFAULT_POLICY_CONFIG: PolicyConfig = {
 export const STRICT_POLICY_CONFIG: PolicyConfig = {
   name: 'Strict Zero-Trust',
   defaultAction: {
+    PERSON: 'MASK',
     API_KEY: 'BLOCK',
     PASSWORD: 'BLOCK',
     EMAIL: 'MASK',
@@ -53,6 +55,7 @@ export const STRICT_POLICY_CONFIG: PolicyConfig = {
 export const PERMISSIVE_POLICY_CONFIG: PolicyConfig = {
   name: 'Permissive Audit',
   defaultAction: {
+    PERSON: 'ALLOW',
     API_KEY: 'MASK',
     PASSWORD: 'MASK',
     EMAIL: 'ALLOW',
@@ -63,6 +66,18 @@ export const PERMISSIVE_POLICY_CONFIG: PolicyConfig = {
 };
 
 // Patterns matching backend/app/engine/detector.py with synthetic test key & assignment tolerance
+const PERSON_TITLE_REGEX = /\b(?:Mr\.|Mrs\.|Ms\.|Miss|Dr\.|Prof\.)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2})\b/g;
+const PERSON_CONTEXT_REGEX = /\b(?:my\s+name\s+is|name\s+is|named|contact\s+person\s*:?|patient\s+name\s*:?|customer\s+name\s*:?|client\s+name\s*:?|employee\s*:?)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2})\b/gi;
+const IGNORED_NAME_WORDS = new Set([
+  'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday',
+  'January', 'February', 'March', 'April', 'May', 'June', 'July', 'August',
+  'September', 'October', 'November', 'December',
+  'LocalShield', 'Google', 'DeepMind', 'Microsoft', 'OpenAI',
+  'Amazon', 'FastAPI', 'React', 'Python', 'Windows', 'GitHub', 'Slack',
+  'Security', 'Policy', 'Gateway', 'Audit', 'Server', 'Database', 'Project',
+  'Please', 'Thank', 'Thanks', 'Hello', 'Dear', 'Report', 'Overview',
+]);
+
 const EMAIL_REGEX = /\b[A-Za-z0-9](?:[A-Za-z0-9._%+-]*[A-Za-z0-9])?@[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?\.[A-Za-z]{2,}\b/g;
 const PHONE_REGEX = /(?:(?<=\s)|(?<=^)|(?<=[(]))(?:\+\d{1,3}[-.\s]*)?(?:\(\d{2,4}\)|\d{2,4})[-.\s]*\d{2,4}[-.\s]*\d{2,9}(?=(?:[\s,.;:!?)]|$))/g;
 const OPENAI_KEY_REGEX = /\b(?:sk-[A-Za-z0-9]{20,}|sk-(?:proj|test)-[A-Za-z0-9_-]{14,})\b/g;
@@ -97,8 +112,46 @@ class LocalEngineSimulator {
 
     const candidates: DetectedEntity[] = [];
 
-    // 1. Emails
+    // 0. Personal Names
     let match: RegExpExecArray | null;
+    const personTitleRegex = new RegExp(PERSON_TITLE_REGEX);
+    while ((match = personTitleRegex.exec(text)) !== null) {
+      const name = match[1].trim();
+      const parts = name.split(/\s+/);
+      if (parts.some((p) => IGNORED_NAME_WORDS.has(p))) continue;
+      const start = match.index + match[0].indexOf(name);
+      candidates.push({
+        id: `person-${start}`,
+        entity_type: 'PERSON',
+        value: name,
+        start,
+        end: start + name.length,
+        confidence: 'HIGH',
+        rule_name: 'person_title_prefix',
+        policy: policyMap['PERSON'],
+      });
+    }
+
+    const personContextRegex = new RegExp(PERSON_CONTEXT_REGEX);
+    while ((match = personContextRegex.exec(text)) !== null) {
+      const name = match[1].trim();
+      const parts = name.split(/\s+/);
+      if (parts.some((p) => IGNORED_NAME_WORDS.has(p))) continue;
+      const start = match.index + match[0].lastIndexOf(name);
+      const isExplicit = /my name is|contact person|patient|customer/i.test(match[0]);
+      candidates.push({
+        id: `person-${start}`,
+        entity_type: 'PERSON',
+        value: name,
+        start,
+        end: start + name.length,
+        confidence: isExplicit ? 'HIGH' : 'MEDIUM',
+        rule_name: 'person_contextual_declaration',
+        policy: policyMap['PERSON'],
+      });
+    }
+
+    // 1. Emails
     const emailRegex = new RegExp(EMAIL_REGEX);
     while ((match = emailRegex.exec(text)) !== null) {
       const val = match[0];
@@ -330,6 +383,10 @@ class ShieldApiService {
     if (url) this.backendUrl = url;
   }
 
+  public setApiMode(mode: 'MOCK' | 'LIVE') {
+    this.setMode(mode);
+  }
+
   public getMode(): { mode: 'MOCK' | 'LIVE'; backendUrl: string } {
     return { mode: this.apiMode, backendUrl: this.backendUrl };
   }
@@ -365,6 +422,7 @@ class ShieldApiService {
   ): Promise<ScanReport> {
     const startTime = performance.now();
     const scanId = `scan-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+    const safeText = typeof text === 'string' ? text : '';
 
     // If LIVE mode selected, attempt real backend connection
     if (this.apiMode === 'LIVE') {
@@ -372,35 +430,111 @@ class ShieldApiService {
         const res = await fetch(`${this.backendUrl}/api/scan`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ prompt: text }),
+          body: JSON.stringify({ prompt: safeText }),
         });
+
         if (res.ok) {
           const data = await res.json();
+          if (!data || typeof data !== 'object') {
+            throw new Error('Invalid scan payload received from backend.');
+          }
+
+          // Backend returns sanitized_prompt (primary field from FastAPI ScanResponse)
+          const sanitizedText =
+            typeof data.sanitized_prompt === 'string'
+              ? data.sanitized_prompt
+              : typeof data.sanitized_text === 'string'
+              ? data.sanitized_text
+              : safeText;
+
+          const sessionId = typeof data.session_id === 'string' ? data.session_id : undefined;
+          const placeholders: string[] = Array.isArray(data.placeholders) ? data.placeholders : [];
+          const warnings: string[] = Array.isArray(data.warnings) ? data.warnings : [];
+
+          // Backend returns entities_detected (from FastAPI ScanResponse)
+          const rawEntities: any[] = Array.isArray(data.entities_detected)
+            ? data.entities_detected
+            : Array.isArray(data.entities)
+            ? data.entities
+            : [];
+
+          // Run local detection on safeText to find exact character spans for UI highlighting
+          const localDetected = simulator.detect(safeText, policyConfig.defaultAction);
+
+          let entities: DetectedEntity[];
+          if (localDetected.length > 0) {
+            entities = localDetected.map((e) => ({
+              ...e,
+              policy: customOverrides?.[e.id] || e.policy,
+            }));
+          } else {
+            entities = rawEntities.map((e: any, idx: number) => {
+              const eType = (e.entity_type || 'UNKNOWN') as EntityType;
+              return {
+                id: `entity-${idx}`,
+                entity_type: eType,
+                value: e.value || e.placeholder || `[${eType}_${idx + 1}]`,
+                start: typeof e.start === 'number' ? e.start : 0,
+                end: typeof e.end === 'number' ? e.end : 0,
+                confidence: (e.confidence || 'HIGH') as Confidence,
+                rule_name: e.rule_name || 'backend_detector',
+                policy: customOverrides?.[`entity-${idx}`] || policyConfig.defaultAction[eType] || 'MASK',
+              };
+            });
+          }
+
+          // Stats calculation
+          const stats: Record<string, number> = {};
+          entities.forEach((e) => {
+            stats[e.entity_type] = (stats[e.entity_type] || 0) + 1;
+          });
+
+          // Local in-memory mapping from simulator, or placeholder identity dictionary
+          const localMask = simulator.mask(safeText, entities);
+          const mapping: Record<string, string> =
+            Object.keys(localMask.mapping).length > 0
+              ? localMask.mapping
+              : data.mapping && typeof data.mapping === 'object'
+              ? data.mapping
+              : placeholders.reduce((acc, ph) => {
+                  acc[ph] = ph;
+                  return acc;
+                }, {} as Record<string, string>);
+
+          // Block reasons & verdict
+          const blockReasons: string[] = [];
+          const hasBlocked = entities.some((e) => e.policy === 'BLOCK');
+          const hasAllowed = entities.some((e) => e.policy === 'ALLOW');
+          if (hasBlocked) {
+            entities.filter((e) => e.policy === 'BLOCK').forEach((e) => {
+              blockReasons.push(`Blocked by policy: [${e.entity_type}] detected via ${e.rule_name}`);
+            });
+          }
+
+          const verdict: OverallVerdict = blockReasons.length > 0 ? 'BLOCKED' : hasAllowed ? 'WARNING' : 'PROTECTED';
+
           return {
             scanId,
+            sessionId,
             timestamp: new Date().toLocaleTimeString(),
-            originalText: text,
-            sanitizedText: data.sanitized_text,
-            mapping: data.mapping || {},
-            entities: (data.entities || []).map((e: any, idx: number) => ({
-              id: `entity-${idx}`,
-              entity_type: e.entity_type,
-              value: e.value,
-              start: e.start,
-              end: e.end,
-              confidence: e.confidence,
-              rule_name: e.rule_name,
-              policy: policyConfig.defaultAction[e.entity_type as EntityType] || 'MASK',
-            })),
-            stats: data.stats || {},
-            verdict: 'PROTECTED',
-            blockReasons: [],
+            originalText: safeText,
+            sanitizedText,
+            mapping,
+            entities,
+            stats: data.stats || stats,
+            verdict,
+            blockReasons,
             executionTimeMs: Math.round(performance.now() - startTime),
             isMock: false,
+            warnings,
+            placeholders,
           };
+        } else {
+          const errData = await res.json().catch(() => ({}));
+          console.warn('Backend /api/scan rejected request:', errData?.detail || `Status ${res.status}`);
         }
-      } catch (err) {
-        console.warn('Backend unavailable, falling back to LocalShield Engine simulator:', err);
+      } catch (err: any) {
+        console.warn('Backend unavailable, running LocalShield Engine simulator:', err?.message || 'Network error');
       }
     }
 
@@ -409,7 +543,7 @@ class ShieldApiService {
       ...policyConfig.defaultAction,
     };
 
-    const detected = simulator.detect(text, effectivePolicyMap);
+    const detected = simulator.detect(safeText, effectivePolicyMap);
 
     const entities = detected.map((e) => {
       const override = customOverrides ? customOverrides[e.id] : undefined;
@@ -419,7 +553,7 @@ class ShieldApiService {
       };
     });
 
-    const { sanitizedText, mapping, stats } = simulator.mask(text, entities);
+    const { sanitizedText, mapping, stats } = simulator.mask(safeText, entities);
 
     // Determine overall verdict
     const blockReasons: string[] = [];
@@ -442,15 +576,17 @@ class ShieldApiService {
     const report: ScanReport = {
       scanId,
       timestamp: new Date().toLocaleTimeString(),
-      originalText: text,
-      sanitizedText,
-      mapping,
-      entities,
-      stats,
+      originalText: safeText,
+      sanitizedText: sanitizedText ?? '',
+      mapping: mapping ?? {},
+      entities: entities ?? [],
+      stats: stats ?? {},
       verdict,
-      blockReasons,
+      blockReasons: blockReasons ?? [],
       executionTimeMs: Math.round(performance.now() - startTime),
       isMock: true,
+      warnings: [],
+      placeholders: Object.keys(mapping ?? {}),
     };
 
     return report;
@@ -463,37 +599,102 @@ class ShieldApiService {
   async dispatchToAi(
     sanitizedPrompt: string,
     mapping: Record<string, string>,
+    sessionId?: string,
     modelName = 'LocalShield-Proxy-Llama-3'
   ): Promise<AIResponse> {
     const startTime = performance.now();
+    const safeSanitized = typeof sanitizedPrompt === 'string' ? sanitizedPrompt : '';
 
     // LIVE MODE: Send strictly to the configured backend gateway endpoint
     if (this.apiMode === 'LIVE') {
       try {
+        // If sessionId is present, run the approved gateway pipeline
+        if (sessionId) {
+          // 1. Approve prompt
+          await fetch(`${this.backendUrl}/api/approve`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ session_id: sessionId, sanitized_prompt: safeSanitized }),
+          });
+
+          // 2. Forward prompt
+          const forwardRes = await fetch(`${this.backendUrl}/api/forward`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ session_id: sessionId, sanitized_prompt: safeSanitized }),
+          });
+
+          if (!forwardRes.ok) {
+            const errData = await forwardRes.json().catch(() => ({}));
+            throw new Error(errData?.detail || `Gateway forward failed (HTTP ${forwardRes.status})`);
+          }
+
+          const forwardData = await forwardRes.json();
+          const rawCompletion = forwardData.completion || '';
+
+          // 3. Unmask response
+          const unmaskRes = await fetch(`${this.backendUrl}/api/unmask`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ session_id: sessionId, sanitized_response: rawCompletion }),
+          });
+
+          let rehydratedCompletion = rawCompletion;
+          let leakDetected = false;
+          let redactedPlaceholders: string[] = [];
+          let warnings: string[] = [];
+
+          if (unmaskRes.ok) {
+            const unmaskData = await unmaskRes.json();
+            rehydratedCompletion = unmaskData.restored_text || rawCompletion;
+            leakDetected = Boolean(unmaskData.leak_detected);
+            redactedPlaceholders = Array.isArray(unmaskData.redacted_placeholders) ? unmaskData.redacted_placeholders : [];
+            warnings = Array.isArray(unmaskData.warnings) ? unmaskData.warnings : [];
+          }
+
+          return {
+            id: forwardData.session_id || `live-resp-${Date.now()}`,
+            model: forwardData.model || modelName,
+            sanitizedPrompt: safeSanitized,
+            rawCompletion,
+            rehydratedCompletion,
+            latencyMs: forwardData.latency_ms || Math.round(performance.now() - startTime),
+            tokensPrompt: Math.round(safeSanitized.length / 4),
+            tokensCompletion: Math.round(rawCompletion.length / 4),
+            timestamp: new Date().toLocaleTimeString(),
+            isMock: false,
+            leakDetected,
+            redactedPlaceholders,
+            warnings,
+          };
+        }
+
+        // Direct /api/dispatch fallback if sessionId is not present
         const response = await fetch(`${this.backendUrl}/api/dispatch`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ sanitized_prompt: sanitizedPrompt }),
+          body: JSON.stringify({ sanitized_prompt: safeSanitized }),
         });
         if (!response.ok) {
-          throw new Error(`HTTP ${response.status} ${response.statusText}`);
+          const errData = await response.json().catch(() => ({}));
+          throw new Error(errData?.detail || `HTTP ${response.status} ${response.statusText}`);
         }
         const data = await response.json();
         return {
           id: data.id || `live-resp-${Date.now()}`,
           model: data.model || 'Backend-Gateway-Model',
-          sanitizedPrompt,
+          sanitizedPrompt: safeSanitized,
           rawCompletion: data.completion || '',
           rehydratedCompletion: data.rehydrated || data.completion || '',
           latencyMs: Math.round(performance.now() - startTime),
-          tokensPrompt: Math.round(sanitizedPrompt.length / 4),
+          tokensPrompt: Math.round(safeSanitized.length / 4),
           tokensCompletion: Math.round((data.completion || '').length / 4),
           timestamp: new Date().toLocaleTimeString(),
           isMock: false,
         };
       } catch (err: any) {
         throw new Error(
-          `Live Gateway Dispatch Failed: ${err.message || 'Cannot reach ' + this.backendUrl + '/api/dispatch'}. In Live Mode, fallback to client simulation is disabled to prevent unauthorized dispatch.`
+          `Live Gateway Dispatch Failed: ${err.message || 'Cannot reach ' + this.backendUrl}. In Live Mode, fallback to client simulation is disabled to prevent unauthorized dispatch.`
         );
       }
     }
@@ -583,13 +784,15 @@ def fetch_issues():
       PASSWORD: Number(raw?.entityCounts?.PASSWORD) || 0,
       EMAIL: Number(raw?.entityCounts?.EMAIL) || 0,
       PHONE: Number(raw?.entityCounts?.PHONE) || 0,
+      PERSON: Number(raw?.entityCounts?.PERSON) || 0,
     };
 
     const countSum =
       entityCounts.API_KEY +
       entityCounts.PASSWORD +
       entityCounts.EMAIL +
-      entityCounts.PHONE;
+      entityCounts.PHONE +
+      entityCounts.PERSON;
 
     const totalEntities =
       typeof raw?.totalEntities === 'number' && !Number.isNaN(raw.totalEntities)

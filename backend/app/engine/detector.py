@@ -13,6 +13,7 @@ from typing import List, Optional, Tuple
 
 class EntityType(str, Enum):
     """Enumeration of supported sensitive entity types."""
+    PERSON = "PERSON"
     EMAIL = "EMAIL"
     PHONE = "PHONE"
     API_KEY = "API_KEY"
@@ -107,6 +108,24 @@ class SensitiveEntityDetector:
         "undefined", "changeme", "example"
     }
 
+    # 5. Personal name patterns (with honorifics, titles, or explicit declarations)
+    PERSON_TITLE_PATTERN = re.compile(
+        r'\b(?:Mr\.|Mrs\.|Ms\.|Miss|Dr\.|Prof\.)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2})\b'
+    )
+    PERSON_CONTEXT_PATTERN = re.compile(
+        r'(?i)\b(?:my\s+name\s+is|name\s+is|named|contact\s+person\s*:?|patient\s+name\s*:?|customer\s+name\s*:?|client\s+name\s*:?|employee\s*:?)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2})\b'
+    )
+    IGNORED_NAME_WORDS = {
+        "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday",
+        "January", "February", "March", "April", "May", "June", "July", "August",
+        "September", "October", "November", "December",
+        "LocalShield", "Localshield", "Google", "DeepMind", "Microsoft", "OpenAI",
+        "Amazon", "FastAPI", "React", "Python", "Windows", "GitHub", "Slack",
+        "Security", "Policy", "Gateway", "Audit", "Server", "Database", "Project",
+        "Please", "Thank", "Thanks", "Hello", "Dear", "Report", "Overview",
+        "United", "States", "New", "York", "San", "Francisco", "North", "South"
+    }
+
     def detect(self, text: str) -> List[DetectedEntity]:
         """Scans the input text and returns all detected sensitive entities.
 
@@ -126,6 +145,7 @@ class SensitiveEntityDetector:
         candidates: List[DetectedEntity] = []
 
         # Run all detection rules
+        candidates.extend(self._detect_persons(text))
         candidates.extend(self._detect_emails(text))
         candidates.extend(self._detect_phones(text))
         candidates.extend(self._detect_api_keys(text))
@@ -133,6 +153,7 @@ class SensitiveEntityDetector:
 
         # Resolve overlapping matches deterministically
         return self._resolve_overlaps(candidates)
+
 
     def _detect_emails(self, text: str) -> List[DetectedEntity]:
         """Detects email addresses."""
@@ -307,6 +328,56 @@ class SensitiveEntityDetector:
                     rule_name="password_assignment"
                 )
             )
+        return results
+
+    def _detect_persons(self, text: str) -> List[DetectedEntity]:
+        """Detects personal names when confidently identifiable via honorifics or explicit declarations."""
+        results = []
+
+        # 1. Title/honorific match (High confidence)
+        for match in self.PERSON_TITLE_PATTERN.finditer(text):
+            name_val = match.group(1).strip()
+            name_parts = name_val.split()
+            if any(part in self.IGNORED_NAME_WORDS for part in name_parts):
+                continue
+
+            start = match.start(1)
+            end = match.end(1)
+            results.append(
+                DetectedEntity(
+                    entity_type=EntityType.PERSON.value,
+                    value=name_val,
+                    start=start,
+                    end=end,
+                    confidence=Confidence.HIGH.value,
+                    rule_name="person_title_prefix"
+                )
+            )
+
+        # 2. Contextual declaration match (High/Medium confidence)
+        for match in self.PERSON_CONTEXT_PATTERN.finditer(text):
+            intro_text = text[match.start():match.start(1)].lower()
+            name_val = match.group(1).strip()
+            name_parts = name_val.split()
+            if any(part in self.IGNORED_NAME_WORDS for part in name_parts):
+                continue
+
+            start = match.start(1)
+            end = match.end(1)
+            is_explicit = any(k in intro_text for k in ("my name is", "contact person", "patient", "customer"))
+            confidence = Confidence.HIGH.value if is_explicit else Confidence.MEDIUM.value
+
+            results.append(
+                DetectedEntity(
+                    entity_type=EntityType.PERSON.value,
+                    value=name_val,
+                    start=start,
+                    end=end,
+                    confidence=confidence,
+                    rule_name="person_contextual_declaration"
+                )
+            )
+
         return results
 
     def _resolve_overlaps(self, candidates: List[DetectedEntity]) -> List[DetectedEntity]:

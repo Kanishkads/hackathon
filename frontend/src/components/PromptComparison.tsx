@@ -3,41 +3,60 @@ import { Columns, Copy, Check, ShieldCheck, Layers } from 'lucide-react';
 import type { DetectedEntity } from '../types/shield';
 
 interface PromptComparisonProps {
-  originalText: string;
-  sanitizedText: string;
-  entities: DetectedEntity[];
-  mapping: Record<string, string>;
+  originalText?: string;
+  sanitizedText?: string;
+  entities?: DetectedEntity[];
+  mapping?: Record<string, string>;
 }
 
 export const PromptComparison: React.FC<PromptComparisonProps> = ({
-  originalText,
-  sanitizedText,
-  entities,
-  mapping,
+  originalText = '',
+  sanitizedText = '',
+  entities = [],
+  mapping = {},
 }) => {
   const [copied, setCopied] = useState(false);
   const [viewMode, setViewMode] = useState<'split' | 'sanitized-only'>('split');
 
+  const safeOriginal = typeof originalText === 'string' ? originalText : '';
+  const safeSanitized = typeof sanitizedText === 'string' ? sanitizedText : '';
+  const safeEntities = Array.isArray(entities) ? entities : [];
+  const safeMapping = mapping && typeof mapping === 'object' ? mapping : {};
+
   const handleCopy = () => {
-    navigator.clipboard.writeText(sanitizedText);
+    if (!safeSanitized) return;
+    navigator.clipboard.writeText(safeSanitized);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };
 
   // Render original text with highlighted sensitive spans
   const renderOriginalHighlighted = () => {
-    if (!originalText || entities.length === 0) {
-      return <span>{originalText || '(No prompt provided)'}</span>;
+    if (!safeOriginal) {
+      return <span>(No prompt provided)</span>;
+    }
+    if (safeEntities.length === 0) {
+      return <span>{safeOriginal}</span>;
     }
 
+    // Filter entities with valid numeric spans for safe slicing
+    const validEntities = safeEntities.filter(
+      (e) => typeof e?.start === 'number' && typeof e?.end === 'number' && e.end > e.start && e.value
+    );
+
+    if (validEntities.length === 0) {
+      return <span>{safeOriginal}</span>;
+    }
+
+    const sorted = [...validEntities].sort((a, b) => a.start - b.start);
     const segments: React.ReactNode[] = [];
     let lastIndex = 0;
 
-    entities.forEach((entity, idx) => {
+    sorted.forEach((entity, idx) => {
       if (entity.start < lastIndex) return;
 
       if (entity.start > lastIndex) {
-        segments.push(originalText.slice(lastIndex, entity.start));
+        segments.push(safeOriginal.slice(lastIndex, entity.start));
       }
 
       const isBlocked = entity.policy === 'BLOCK';
@@ -56,7 +75,7 @@ export const PromptComparison: React.FC<PromptComparisonProps> = ({
             borderBottom: `2px solid ${isBlocked ? '#EF4444' : isAllowed ? '#F59E0B' : '#00F0FF'}`,
             color: isBlocked ? '#FCA5A5' : isAllowed ? '#FDE68A' : '#7DD3FC',
           }}
-          title={`[${entity.entity_type}] Policy: ${entity.policy} (${entity.rule_name})`}
+          title={`[${entity.entity_type}] Policy: ${entity.policy} (${entity.rule_name || 'detection'})`}
         >
           {entity.value}
         </span>
@@ -65,8 +84,8 @@ export const PromptComparison: React.FC<PromptComparisonProps> = ({
       lastIndex = entity.end;
     });
 
-    if (lastIndex < originalText.length) {
-      segments.push(originalText.slice(lastIndex));
+    if (lastIndex < safeOriginal.length) {
+      segments.push(safeOriginal.slice(lastIndex));
     }
 
     return <>{segments}</>;
@@ -74,12 +93,12 @@ export const PromptComparison: React.FC<PromptComparisonProps> = ({
 
   // Render sanitized text with token pills
   const renderSanitizedHighlighted = () => {
-    if (!sanitizedText) {
+    if (!safeSanitized) {
       return <span style={{ color: 'var(--text-muted)' }}>(Prompt has not been scanned yet)</span>;
     }
 
     const placeholderRegex = /(\[[A-Z_]+_\d+\]|\[[A-Z_]+_REDACTED\])/g;
-    const parts = sanitizedText.split(placeholderRegex);
+    const parts = safeSanitized.split(placeholderRegex);
 
     return (
       <>
@@ -97,7 +116,12 @@ export const PromptComparison: React.FC<PromptComparisonProps> = ({
     );
   };
 
-  const placeholderCount = Object.keys(mapping).length;
+  // Distinct placeholder tokens found in mapping or within the sanitized text
+  const extractedTokens = safeSanitized.match(/\[[A-Z_]+_\d+\]/g) || [];
+  const dictionaryTokens = Array.from(
+    new Set([...Object.keys(safeMapping), ...extractedTokens])
+  );
+  const placeholderCount = dictionaryTokens.length;
 
   return (
     <div className="panel" style={{ padding: '1.25rem 1.5rem', display: 'flex', flexDirection: 'column', gap: '1rem' }}>
@@ -180,7 +204,7 @@ export const PromptComparison: React.FC<PromptComparisonProps> = ({
           {/* Copy Sanitized */}
           <button
             onClick={handleCopy}
-            disabled={!sanitizedText}
+            disabled={!safeSanitized}
             className="btn btn-secondary"
             style={{ padding: '0.3rem 0.75rem', fontSize: '0.74rem' }}
             title="Copy exact sanitized payload to clipboard"
@@ -218,7 +242,7 @@ export const PromptComparison: React.FC<PromptComparisonProps> = ({
                 Ingress Raw Prompt (Local Memory Only)
               </span>
               <span style={{ color: 'var(--text-dim)', fontFamily: 'var(--font-mono)' }}>
-                {originalText.length} chars
+                {safeOriginal.length} chars
               </span>
             </div>
 
@@ -248,7 +272,7 @@ export const PromptComparison: React.FC<PromptComparisonProps> = ({
               Sanitized Egress Payload (Prepared for LLM)
             </span>
             <span style={{ color: 'var(--text-dim)', fontFamily: 'var(--font-mono)' }}>
-              {sanitizedText.length} chars
+              {safeSanitized.length} chars
             </span>
           </div>
 
@@ -291,7 +315,7 @@ export const PromptComparison: React.FC<PromptComparisonProps> = ({
             <span>Active Token Dictionary:</span>
           </div>
           <div style={{ display: 'flex', gap: '0.45rem', flexWrap: 'wrap' }}>
-            {Object.keys(mapping).map((token) => (
+            {dictionaryTokens.map((token) => (
               <span
                 key={token}
                 style={{

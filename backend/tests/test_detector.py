@@ -138,6 +138,54 @@ class TestPasswordDetection:
         passwords = [e for e in entities if e.entity_type == EntityType.PASSWORD.value]
         assert len(passwords) == 0
 
+class TestPersonDetection:
+    """Tests for personal name detection and false-positive avoidance."""
+
+    def test_honorific_titles(self, detector: SensitiveEntityDetector):
+        sample = "Please arrange a consultation with Dr. Jane Doe and Mr. John Smith."
+        entities = detector.detect(sample)
+        person_entities = [e for e in entities if e.entity_type == EntityType.PERSON.value]
+
+        assert len(person_entities) == 2
+        names = [e.value for e in person_entities]
+        assert "Jane Doe" in names
+        assert "John Smith" in names
+        for e in person_entities:
+            assert e.confidence == Confidence.HIGH.value
+
+    def test_contextual_declarations(self, detector: SensitiveEntityDetector):
+        sample = "Hello, my name is Alice Walker. The attending physician was Dr. Robert Taylor."
+        entities = detector.detect(sample)
+        person_entities = [e for e in entities if e.entity_type == EntityType.PERSON.value]
+
+        assert len(person_entities) >= 2
+        names = [e.value for e in person_entities]
+        assert "Alice Walker" in names
+        assert "Robert Taylor" in names
+
+    def test_common_non_person_terms_ignored(self, detector: SensitiveEntityDetector):
+        sample = "We use LocalShield AI on Monday to query Google Gemini and Anthropic Claude."
+        entities = detector.detect(sample)
+        person_entities = [e for e in entities if e.entity_type == EntityType.PERSON.value]
+        # Common terms in IGNORED_NAME_WORDS or brand terms must not be detected as persons
+        person_values = [e.value for e in person_entities]
+        assert "LocalShield AI" not in person_values
+        assert "Monday" not in person_values
+
+    def test_mixed_sensitive_entities_detection(self, detector: SensitiveEntityDetector):
+        sample = (
+            "Contact Dr. Alan Turing at alan.turing@bletchley.org or +1-555-0144. "
+            "Use apiKey: 'sk-proj-testkey1234567890abcdef' with password = 'EnigmaSecret123'."
+        )
+        entities = detector.detect(sample)
+        types = {e.entity_type for e in entities}
+        assert EntityType.PERSON.value in types
+        assert EntityType.EMAIL.value in types
+        assert EntityType.PHONE.value in types
+        assert EntityType.API_KEY.value in types
+        assert EntityType.PASSWORD.value in types
+
+
 
 class TestEdgeCasesAndSafety:
     """Tests for edge cases, non-sensitive text, repeated values, and safety."""

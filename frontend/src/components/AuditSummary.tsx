@@ -290,6 +290,11 @@ export const AuditSummary: React.FC<AuditSummaryProps> = ({
                                 {log.entityCounts.PHONE} Phone
                               </span>
                             )}
+                            {Number(log.entityCounts.PERSON) > 0 && (
+                              <span className="chip chip-person" style={{ padding: '0.05rem 0.35rem', fontSize: '0.68rem' }}>
+                                {log.entityCounts.PERSON} Person
+                              </span>
+                            )}
                             {log.totalEntities === 0 && (
                               <span style={{ color: '#10B981', fontSize: '0.7rem' }}>Clean</span>
                             )}

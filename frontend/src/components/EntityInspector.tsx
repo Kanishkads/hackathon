@@ -6,6 +6,7 @@ import {
   Lock,
   Mail,
   Phone,
+  User,
   Eye,
   EyeOff,
   CheckCircle2,
@@ -13,17 +14,18 @@ import {
 import type { DetectedEntity, EntityType, PolicyAction } from '../types/shield';
 
 interface EntityInspectorProps {
-  entities: DetectedEntity[];
+  entities?: DetectedEntity[];
   onUpdateEntityPolicy: (entityId: string, policy: PolicyAction) => void;
   onSetAllPolicies: (policy: PolicyAction) => void;
 }
 
 export const EntityInspector: React.FC<EntityInspectorProps> = ({
-  entities,
+  entities = [],
   onUpdateEntityPolicy,
   onSetAllPolicies,
 }) => {
   const [revealedIds, setRevealedIds] = useState<Record<string, boolean>>({});
+  const safeEntities = Array.isArray(entities) ? entities : [];
 
   const toggleReveal = (id: string) => {
     setRevealedIds((prev) => ({ ...prev, [id]: !prev[id] }));
@@ -39,6 +41,8 @@ export const EntityInspector: React.FC<EntityInspectorProps> = ({
         return <Mail size={12} />;
       case 'PHONE':
         return <Phone size={12} />;
+      case 'PERSON':
+        return <User size={12} />;
     }
   };
 
@@ -52,17 +56,20 @@ export const EntityInspector: React.FC<EntityInspectorProps> = ({
         return 'entity-badge-email';
       case 'PHONE':
         return 'entity-badge-phone';
+      case 'PERSON':
+        return 'entity-badge-person';
     }
   };
 
   const maskValueDisplay = (val: string, type: EntityType) => {
+    const s = typeof val === 'string' ? val : '';
     if (type === 'PASSWORD') {
       return '••••••••••••';
     }
-    if (val.length <= 8) {
-      return val.slice(0, 2) + '••••' + val.slice(-1);
+    if (s.length <= 8) {
+      return s.slice(0, 2) + '••••' + s.slice(-1);
     }
-    return val.slice(0, 4) + '••••••••' + val.slice(-4);
+    return s.slice(0, 4) + '••••••••' + s.slice(-4);
   };
 
   return (
@@ -75,15 +82,15 @@ export const EntityInspector: React.FC<EntityInspectorProps> = ({
               width: '28px',
               height: '28px',
               borderRadius: 'var(--radius-sm)',
-              background: entities.length > 0 ? 'rgba(245, 158, 11, 0.1)' : 'var(--status-success-bg)',
-              border: `1px solid ${entities.length > 0 ? 'rgba(245, 158, 11, 0.3)' : 'var(--status-success-border)'}`,
+              background: safeEntities.length > 0 ? 'rgba(245, 158, 11, 0.1)' : 'var(--status-success-bg)',
+              border: `1px solid ${safeEntities.length > 0 ? 'rgba(245, 158, 11, 0.3)' : 'var(--status-success-border)'}`,
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
-              color: entities.length > 0 ? '#FBBF24' : '#34D399',
+              color: safeEntities.length > 0 ? '#FBBF24' : '#34D399',
             }}
           >
-            {entities.length > 0 ? <ShieldAlert size={15} /> : <ShieldCheck size={15} />}
+            {safeEntities.length > 0 ? <ShieldAlert size={15} /> : <ShieldCheck size={15} />}
           </div>
           <div>
             <div style={{ fontSize: '0.925rem', fontWeight: 700, color: 'var(--text-primary)', letterSpacing: '-0.01em' }}>
@@ -94,15 +101,15 @@ export const EntityInspector: React.FC<EntityInspectorProps> = ({
             </div>
           </div>
           <span
-            className={entities.length > 0 ? 'status-badge status-badge-warning' : 'status-badge status-badge-success'}
+            className={safeEntities.length > 0 ? 'status-badge status-badge-warning' : 'status-badge status-badge-success'}
             style={{ fontSize: '0.7rem', marginLeft: '0.25rem' }}
           >
-            {entities.length} {entities.length === 1 ? 'threat vector' : 'threat vectors'}
+            {safeEntities.length} {safeEntities.length === 1 ? 'threat vector' : 'threat vectors'}
           </span>
         </div>
 
         {/* Quick Bulk Policy Actions */}
-        {entities.length > 0 && (
+        {safeEntities.length > 0 && (
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', fontSize: '0.72rem' }}>
             <span style={{ color: 'var(--text-muted)', fontWeight: 600, textTransform: 'uppercase', fontSize: '0.66rem' }}>
               Bulk Action:
@@ -148,7 +155,7 @@ export const EntityInspector: React.FC<EntityInspectorProps> = ({
       </div>
 
       {/* Entity Findings Cards */}
-      {entities.length === 0 ? (
+      {safeEntities.length === 0 ? (
         <div
           style={{
             padding: '1.25rem',
@@ -170,7 +177,7 @@ export const EntityInspector: React.FC<EntityInspectorProps> = ({
         </div>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-          {entities.map((entity) => {
+          {safeEntities.map((entity) => {
             const isRevealed = !!revealedIds[entity.id];
             const displayVal = isRevealed ? entity.value : maskValueDisplay(entity.value, entity.entity_type);
 

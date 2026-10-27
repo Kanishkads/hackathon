@@ -376,6 +376,11 @@ export const AuditPage: React.FC = () => {
                               {log.entityCounts.PHONE} Phone
                             </span>
                           )}
+                          {(Number(log.entityCounts?.PERSON) || 0) > 0 && (
+                            <span className="entity-badge entity-badge-person" style={{ fontSize: '0.65rem' }}>
+                              {log.entityCounts.PERSON} Person
+                            </span>
+                          )}
                           {(Number(log.totalEntities) || 0) === 0 && (
                             <span style={{ color: 'var(--text-dim)', fontSize: '0.7rem' }}>None</span>
                           )}

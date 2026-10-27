@@ -10,32 +10,35 @@ import {
 import type { DetectedEntity, OverallVerdict } from '../types/shield';
 
 interface ApprovalGateProps {
-  verdict: OverallVerdict;
-  blockReasons: string[];
-  entities: DetectedEntity[];
-  sanitizedText: string;
-  isMock: boolean;
+  verdict?: OverallVerdict;
+  blockReasons?: string[];
+  entities?: DetectedEntity[];
+  sanitizedText?: string;
+  isMock?: boolean;
   onApproveAndDispatch: () => void;
   onReset: () => void;
-  isDispatching: boolean;
+  isDispatching?: boolean;
 }
 
 export const ApprovalGate: React.FC<ApprovalGateProps> = ({
-  verdict,
-  blockReasons,
-  entities,
-  sanitizedText,
-  isMock,
+  verdict = 'PROTECTED',
+  blockReasons = [],
+  entities = [],
+  sanitizedText = '',
+  isMock = false,
   onApproveAndDispatch,
   onReset,
-  isDispatching,
+  isDispatching = false,
 }) => {
   const isBlocked = verdict === 'BLOCKED';
   const isWarning = verdict === 'WARNING';
 
-  const maskedEntities = entities.filter((e) => e.policy === 'MASK');
-  const allowedEntities = entities.filter((e) => e.policy === 'ALLOW');
-  const blockedEntities = entities.filter((e) => e.policy === 'BLOCK');
+  const safeEntities = Array.isArray(entities) ? entities : [];
+  const safeSanitized = typeof sanitizedText === 'string' ? sanitizedText : '';
+
+  const maskedEntities = safeEntities.filter((e) => e?.policy === 'MASK');
+  const allowedEntities = safeEntities.filter((e) => e?.policy === 'ALLOW');
+  const blockedEntities = safeEntities.filter((e) => e?.policy === 'BLOCK');
 
   const getStatusLabel = () => {
     if (isBlocked) return 'Dispatch Blocked by Security Policy';
@@ -198,7 +201,7 @@ export const ApprovalGate: React.FC<ApprovalGateProps> = ({
 
           <button
             onClick={onApproveAndDispatch}
-            disabled={isBlocked || isDispatching || !sanitizedText.trim()}
+            disabled={isBlocked || isDispatching || !safeSanitized.trim()}
             className="btn btn-primary"
             style={{
               padding: '0.55rem 1.45rem',

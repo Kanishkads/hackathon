@@ -143,43 +143,70 @@ export const ShieldProvider: React.FC<{ children: React.ReactNode }> = ({ childr
 
       try {
         const report = await shieldApi.scanPrompt(textToScan, policyConfig, customOverrides);
-        setScanReport(report);
+
+        // Validate report before updating state
+        if (!report || typeof report !== 'object') {
+          throw new Error('Received an invalid or empty scan report.');
+        }
+
+        const safeSanitizedText = typeof report.sanitizedText === 'string' ? report.sanitizedText : '';
+        const safeOriginalText = typeof report.originalText === 'string' ? report.originalText : textToScan;
+        const safeEntities = Array.isArray(report.entities) ? report.entities : [];
+        const safeMapping = report.mapping && typeof report.mapping === 'object' ? report.mapping : {};
+
+        // Normalized report ensuring no undefined properties
+        const normalizedReport: ScanReport = {
+          ...report,
+          originalText: safeOriginalText,
+          sanitizedText: safeSanitizedText,
+          entities: safeEntities,
+          mapping: safeMapping,
+          stats: report.stats && typeof report.stats === 'object' ? report.stats : {},
+          blockReasons: Array.isArray(report.blockReasons) ? report.blockReasons : [],
+          verdict: report.verdict || 'PROTECTED',
+          executionTimeMs: typeof report.executionTimeMs === 'number' ? report.executionTimeMs : 0,
+        };
+
+        setScanReport(normalizedReport);
 
         // Record a genuine audit log entry
         const snippet =
-          textToScan.trim().split('\n')[0].slice(0, 48) +
-          (textToScan.length > 48 ? '...' : '');
+          safeOriginalText.trim().split('\n')[0].slice(0, 48) +
+          (safeOriginalText.length > 48 ? '...' : '');
 
-        const maskedCount = report.entities.filter((e) => e.policy === 'MASK').length;
-        const allowedCount = report.entities.filter((e) => e.policy === 'ALLOW').length;
-        const blockedCount = report.entities.filter((e) => e.policy === 'BLOCK').length;
+        const maskedCount = safeEntities.filter((e) => e?.policy === 'MASK').length;
+        const allowedCount = safeEntities.filter((e) => e?.policy === 'ALLOW').length;
+        const blockedCount = safeEntities.filter((e) => e?.policy === 'BLOCK').length;
 
         const entry: AuditLogItem = {
           id: `evt-${Date.now().toString(36)}-${Math.random().toString(36).substring(2, 6)}`,
           timestamp: new Date().toLocaleTimeString(),
           promptSnippet: snippet,
           entityCounts: {
-            API_KEY: report.entities.filter((e) => e.entity_type === 'API_KEY').length,
-            PASSWORD: report.entities.filter((e) => e.entity_type === 'PASSWORD').length,
-            EMAIL: report.entities.filter((e) => e.entity_type === 'EMAIL').length,
-            PHONE: report.entities.filter((e) => e.entity_type === 'PHONE').length,
+            API_KEY: safeEntities.filter((e) => e?.entity_type === 'API_KEY').length,
+            PASSWORD: safeEntities.filter((e) => e?.entity_type === 'PASSWORD').length,
+            EMAIL: safeEntities.filter((e) => e?.entity_type === 'EMAIL').length,
+            PHONE: safeEntities.filter((e) => e?.entity_type === 'PHONE').length,
+            PERSON: safeEntities.filter((e) => e?.entity_type === 'PERSON').length,
           },
-          totalEntities: report.entities.length,
-          verdict: report.verdict,
+          totalEntities: safeEntities.length,
+          verdict: normalizedReport.verdict,
           policyProfile: policyConfig.name,
-          latencyMs: report.executionTimeMs,
-          executionMode: report.isMock ? 'Client Simulation' : 'Live Backend',
-          sanitizedLength: report.sanitizedText.length,
+          latencyMs: normalizedReport.executionTimeMs,
+          executionMode: normalizedReport.isMock ? 'Client Simulation' : 'Live Backend',
+          sanitizedLength: safeSanitizedText.length,
           maskedCount,
           allowedCount,
           blockedCount,
-          placeholderTokens: Object.keys(report.mapping),
+          placeholderTokens: Object.keys(safeMapping),
         };
 
         shieldApi.saveAuditLog(entry);
         setAuditLogs(shieldApi.getAuditLogs());
-      } catch (err) {
-        console.error('Scan failed:', err);
+      } catch (err: any) {
+        // Safe logging without leaking sensitive values
+        console.error('Scan failed:', err?.message || 'Unknown scan error');
+        setDispatchError(err?.message ? `Scan error: ${err.message}` : 'Scan operation failed.');
       } finally {
         setIsScanning(false);
       }
@@ -193,8 +220,14 @@ export const ShieldProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     setCustomOverrides(updated);
 
     if (promptText) {
-      const report = await shieldApi.scanPrompt(promptText, policyConfig, updated);
-      setScanReport(report);
+      try {
+        const report = await shieldApi.scanPrompt(promptText, policyConfig, updated);
+        if (report && typeof report === 'object' && typeof report.sanitizedText === 'string') {
+          setScanReport(report);
+        }
+      } catch (err: any) {
+        console.error('Policy update scan failed:', err?.message || 'Unknown error');
+      }
     }
   };
 
@@ -202,13 +235,19 @@ export const ShieldProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   const setAllEntityPolicies = async (action: PolicyAction) => {
     if (!scanReport) return;
     const newOverrides: Record<string, PolicyAction> = {};
-    scanReport.entities.forEach((e) => {
+    (scanReport.entities || []).forEach((e) => {
       newOverrides[e.id] = action;
     });
     setCustomOverrides(newOverrides);
 
-    const report = await shieldApi.scanPrompt(promptText, policyConfig, newOverrides);
-    setScanReport(report);
+    try {
+      const report = await shieldApi.scanPrompt(promptText, policyConfig, newOverrides);
+      if (report && typeof report === 'object' && typeof report.sanitizedText === 'string') {
+        setScanReport(report);
+      }
+    } catch (err: any) {
+      console.error('Bulk policy update scan failed:', err?.message || 'Unknown error');
+    }
   };
 
   // Reset Scanner
@@ -228,13 +267,14 @@ export const ShieldProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     setDispatchError(null);
     try {
       const resp = await shieldApi.dispatchToAi(
-        scanReport.sanitizedText,
-        scanReport.mapping
+        scanReport.sanitizedText ?? '',
+        scanReport.mapping ?? {},
+        scanReport.sessionId
       );
       setAiResponse(resp);
     } catch (err: any) {
-      console.error('Dispatch failed:', err);
-      setDispatchError(err.message || 'Dispatch failed.');
+      console.error('Dispatch failed:', err?.message || 'Unknown error');
+      setDispatchError(err?.message || 'Dispatch failed.');
     } finally {
       setIsDispatching(false);
     }
